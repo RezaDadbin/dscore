@@ -1,0 +1,982 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="DayScore" />
+  <meta name="theme-color" content="#f7f3eb" />
+  <title>DayScore</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icon-192.png" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+
+<body>
+  <div class="app">
+    <div class="top">
+      <div class="brand-row">
+        <div class="brand">
+          <h1>DayScore</h1>
+          <span id="subtitle">Local JSON tracker</span>
+        </div>
+
+        <div class="top-actions" id="topActions">
+          <button class="tiny dark" onclick="openDayForm()">Add a day</button>
+          <button class="tiny ghost" onclick="showImexPage()">ImEx</button>
+        </div>
+      </div>
+    </div>
+
+    <main id="daysPage" class="page">
+      <div id="dayFormHost" class="hidden"></div>
+      <div id="daysList"></div>
+    </main>
+
+    <main id="statusPage" class="page hidden">
+      <section class="status-card">
+        <h2 style="margin:0 0 4px; letter-spacing:-0.04em;">Status</h2>
+        <p class="note">Daily score trend, plus weekly total, average, and max day score.</p>
+
+        <div class="hero-stats">
+          <div class="hero-box">
+            <b>This week total</b>
+            <span id="thisWeekTotal">0</span>
+          </div>
+          <div class="hero-box">
+            <b>This week avg</b>
+            <span id="thisWeekAvg">0</span>
+          </div>
+          <div class="hero-box">
+            <b>This week max</b>
+            <span id="thisWeekMax">0</span>
+          </div>
+        </div>
+
+        <div class="chart-wrap">
+          <canvas id="scoreChart"></canvas>
+        </div>
+      </section>
+
+      <section class="status-card">
+        <h2 style="margin:0 0 4px; letter-spacing:-0.04em;">Weekly summary</h2>
+        <p class="note">Tap a week to show or hide that week’s daily chart.</p>
+        <div class="weeks" id="weeksList"></div>
+      </section>
+    </main>
+
+    <main id="imexPage" class="page hidden">
+      <section class="imex-card">
+        <h2 style="margin:0 0 4px; letter-spacing:-0.04em;">Import / Export</h2>
+        <p class="note">Your main data is saved automatically on this phone. Use backup/export to protect it.</p>
+
+        <div class="imex-grid">
+          <button class="imex-button" onclick="exportData()">
+            <div>
+              <strong>Backup now</strong>
+              <span>Create a JSON backup file. Save it to Files / iCloud Drive.</span>
+            </div>
+            <div class="arrow">↓</div>
+          </button>
+
+          <button class="imex-button" onclick="document.getElementById('importFile').click()">
+            <div>
+              <strong>Import backup</strong>
+              <span>Restore data from a previous JSON backup.</span>
+            </div>
+            <div class="arrow">↑</div>
+          </button>
+
+          <button class="imex-button" onclick="copyRawJSON()">
+            <div>
+              <strong>Copy raw JSON</strong>
+              <span>Copy your current data to clipboard as text.</span>
+            </div>
+            <div class="arrow">⧉</div>
+          </button>
+        </div>
+
+        <input id="importFile" type="file" accept="application/json" class="hidden" onchange="importData(event)" />
+
+        <div class="storage-box" id="storageInfo">
+          Storage: local browser storage on this phone.
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <nav class="nav">
+    <button id="daysTab" class="active" onclick="showDaysPage()">Days</button>
+    <button id="statusTab" onclick="showStatusPage()">Status</button>
+  </nav>
+
+  <script>
+    const STORAGE_KEY = "dayscore_data_v3";
+    const OLD_KEYS = ["dayscore_data_v2", "dayscore_data_v1"];
+
+    const COEFF = {
+      IU: 10,
+      INU: 7,
+      NIU: 5,
+      NINU: 3
+    };
+
+    const TYPE_LABELS = {
+      IU: "Important + Urgent",
+      INU: "Important + Not Urgent",
+      NIU: "Not Important + Urgent",
+      NINU: "Not Important + Not Urgent"
+    };
+
+    function formatScore(value) {
+      const n = Number(value || 0);
+      if (Number.isInteger(n)) return String(n);
+      return n.toFixed(2).replace(/\.?0+$/, "");
+    }
+
+    let data = loadData();
+    let expandedDayId = null;
+    let expandedWeekStart = null;
+    let dayFormOpen = false;
+    let editingAction = null;
+
+    function uid() {
+      return crypto.randomUUID ? crypto.randomUUID() : String(Date.now() + Math.random());
+    }
+
+    function parseLocalDate(dateStr) {
+      return new Date(dateStr + "T12:00:00");
+    }
+
+    function toISODate(d) {
+      const y = d.getFullYear();
+      const m = String(d.getMonth() + 1).padStart(2, "0");
+      const day = String(d.getDate()).padStart(2, "0");
+      return `${y}-${m}-${day}`;
+    }
+
+    function todayISO() {
+      return toISODate(new Date());
+    }
+
+    function formatDate(dateStr) {
+      const d = parseLocalDate(dateStr);
+      return d.toLocaleDateString(undefined, {
+        weekday: "long",
+        month: "long",
+        day: "numeric"
+      });
+    }
+
+    function formatShortDate(dateStr) {
+      const d = parseLocalDate(dateStr);
+      return d.toLocaleDateString(undefined, {
+        month: "short",
+        day: "numeric"
+      });
+    }
+
+    function loadData() {
+      try {
+        const current = localStorage.getItem(STORAGE_KEY);
+        if (current) return JSON.parse(current) || [];
+
+        for (const key of OLD_KEYS) {
+          const old = localStorage.getItem(key);
+          if (old) {
+            const parsed = JSON.parse(old) || [];
+            localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
+            return parsed;
+          }
+        }
+
+        return [];
+      } catch {
+        return [];
+      }
+    }
+
+    function saveData() {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+      updateStorageInfo();
+    }
+
+    function actionScore(action) {
+      return Number(action.hours || 0) * COEFF[action.type];
+    }
+
+    function getDayStatus(day) {
+      const status = { total: 0, IU: 0, INU: 0, NIU: 0, NINU: 0 };
+
+      for (const action of day.actions || []) {
+        const score = actionScore(action);
+        status.total += score;
+        if (status[action.type] !== undefined) status[action.type] += score;
+      }
+
+      return status;
+    }
+
+    function getWeekStart(dateStr) {
+      const d = parseLocalDate(dateStr);
+      const day = d.getDay(); // Sunday 0, Monday 1
+      const diff = day === 0 ? -6 : 1 - day; // Monday start
+      d.setDate(d.getDate() + diff);
+      return toISODate(d);
+    }
+
+    function getWeekEnd(weekStartStr) {
+      const d = parseLocalDate(weekStartStr);
+      d.setDate(d.getDate() + 6);
+      return toISODate(d);
+    }
+
+    function getWeeklyStats() {
+      const weeks = {};
+
+      for (const day of data) {
+        const weekStart = getWeekStart(day.date);
+        if (!weeks[weekStart]) {
+          weeks[weekStart] = {
+            weekStart,
+            weekEnd: getWeekEnd(weekStart),
+            total: 0,
+            count: 0,
+            max: 0,
+            days: []
+          };
+        }
+
+        const score = getDayStatus(day).total;
+        weeks[weekStart].total += score;
+        weeks[weekStart].count += 1;
+        weeks[weekStart].max = Math.max(weeks[weekStart].max, score);
+        weeks[weekStart].days.push({
+          date: day.date,
+          score
+        });
+      }
+
+      return Object.values(weeks)
+        .map(w => ({
+          ...w,
+          avg: w.count ? w.total / w.count : 0,
+          days: w.days.sort((a, b) => a.date.localeCompare(b.date))
+        }))
+        .sort((a, b) => b.weekStart.localeCompare(a.weekStart));
+    }
+
+    function getThisWeekStats() {
+      const weekStart = getWeekStart(todayISO());
+      const found = getWeeklyStats().find(w => w.weekStart === weekStart);
+
+      return found || {
+        weekStart,
+        weekEnd: getWeekEnd(weekStart),
+        total: 0,
+        count: 0,
+        avg: 0,
+        max: 0,
+        days: []
+      };
+    }
+
+    function sortDaysLatestFirst() {
+      data.sort((a, b) => b.date.localeCompare(a.date));
+    }
+
+    function sortActionsLatestFirst(day) {
+      day.actions = day.actions || [];
+      day.actions.sort((a, b) => String(b.createdAt || "").localeCompare(String(a.createdAt || "")));
+    }
+
+    function render() {
+      sortDaysLatestFirst();
+      updateSubtitle();
+      renderDayForm();
+      renderDays();
+
+      if (!document.getElementById("statusPage").classList.contains("hidden")) {
+        renderStatus();
+      }
+
+      if (!document.getElementById("imexPage").classList.contains("hidden")) {
+        updateStorageInfo();
+      }
+    }
+
+    function updateSubtitle() {
+      const thisWeek = getThisWeekStats();
+      document.getElementById("subtitle").textContent = `This week: ${formatScore(thisWeek.total)} score`;
+    }
+
+    function renderDays() {
+      const daysList = document.getElementById("daysList");
+      daysList.innerHTML = "";
+
+      if (data.length === 0) {
+        daysList.innerHTML = `
+          <section class="day-card welcome-card">
+            <div class="welcome-content">
+              <div class="welcome-kicker">PRIVATE LOCAL TRACKER</div>
+              <h2 class="welcome-title">Start seeing your days clearly.</h2>
+              <p class="note">
+                Add a day, log your actions, and let DayScore calculate daily and weekly scores.
+                Everything is saved locally on this device.
+              </p>
+
+              <div class="welcome-mini-grid">
+                <div class="welcome-mini"><b>IU</b><span>Important + Urgent</span></div>
+                <div class="welcome-mini"><b>INU</b><span>Important + Not Urgent</span></div>
+                <div class="welcome-mini"><b>NIU</b><span>Not Important + Urgent</span></div>
+                <div class="welcome-mini"><b>NINU</b><span>Not Important + Not Urgent</span></div>
+              </div>
+
+              <div class="welcome-actions">
+                <button class="primary" onclick="createToday()">Create today</button>
+                <button class="ghost" onclick="openDayForm()">Choose date</button>
+                <button class="ghost" onclick="showImexPage()">Import backup</button>
+              </div>
+            </div>
+          </section>
+        `;
+        return;
+      }
+
+      for (const day of data) {
+        sortActionsLatestFirst(day);
+        const status = getDayStatus(day);
+        const isExpanded = expandedDayId === day.id;
+
+        const card = document.createElement("section");
+        card.className = "day-card";
+
+        card.innerHTML = `
+          <div class="day-head">
+            <div>
+              <h2 class="day-title">${formatDate(day.date)}</h2>
+              <div class="date-line">${day.date}</div>
+            </div>
+
+            <div class="score-side">
+              <div class="score-pill">${formatScore(status.total)}</div>
+              <div class="day-tools">
+                <button class="tiny ghost" onclick="toggleDay('${day.id}')">${isExpanded ? "Hide" : "Actions"}</button>
+                <button class="tiny danger" onclick="deleteDay('${day.id}')">Delete</button>
+              </div>
+            </div>
+          </div>
+
+          ${day.note ? `<p class="day-note-preview">${escapeHTML(day.note)}</p>` : ""}
+
+          <div class="chips compact-score-grid">
+            <div class="chip"><b>IU</b><span>${formatScore(status.IU)}</span><small>${TYPE_LABELS.IU}</small></div>
+            <div class="chip"><b>INU</b><span>${formatScore(status.INU)}</span><small>${TYPE_LABELS.INU}</small></div>
+            <div class="chip"><b>NIU</b><span>${formatScore(status.NIU)}</span><small>${TYPE_LABELS.NIU}</small></div>
+            <div class="chip"><b>NINU</b><span>${formatScore(status.NINU)}</span><small>${TYPE_LABELS.NINU}</small></div>
+          </div>
+
+          ${isExpanded ? `
+            <div class="day-details">
+              <div class="form note-form">
+                <div class="form-title">Daily note</div>
+                <input id="note-${day.id}" placeholder="Short note for this day" value="${escapeHTML(day.note || '')}" autocomplete="off" />
+                <button class="ghost" onclick="saveDayNote('${day.id}')">Save Note</button>
+              </div>
+
+              ${renderActionForm(day)}
+
+              <div class="actions" id="actions-${day.id}"></div>
+            </div>
+          ` : ""}
+        `;
+
+        daysList.appendChild(card);
+
+        if (isExpanded) {
+          const actionsBox = document.getElementById(`actions-${day.id}`);
+
+          if (!day.actions || day.actions.length === 0) {
+            actionsBox.innerHTML = `<div class="empty" style="margin-top:0">No actions for this day.</div>`;
+          } else {
+            actionsBox.innerHTML = day.actions.map(action => `
+              <div class="action">
+                <div class="action-main">
+                  <div class="action-name">${escapeHTML(action.name)}</div>
+                  <div class="muted">
+                    <span class="tag">${action.type} · ${TYPE_LABELS[action.type]}</span>
+                    ${formatScore(action.hours)}h × ${COEFF[action.type]}
+                  </div>
+                </div>
+
+                <div class="action-score">${formatScore(actionScore(action))}</div>
+
+                <div class="action-buttons">
+                  <button class="small ghost" onclick="editAction('${day.id}', '${action.id}')">Edit</button>
+                  <button class="small danger" onclick="deleteAction('${day.id}', '${action.id}')">Delete</button>
+                </div>
+              </div>
+            `).join("");
+          }
+        }
+      }
+    }
+
+    function renderStatus() {
+      const thisWeek = getThisWeekStats();
+
+      document.getElementById("thisWeekTotal").textContent = formatScore(thisWeek.total);
+      document.getElementById("thisWeekAvg").textContent = thisWeek.avg.toFixed(1);
+      document.getElementById("thisWeekMax").textContent = formatScore(thisWeek.max);
+
+      renderWeeksList();
+      drawDailyChart();
+    }
+
+    function renderWeeksList() {
+      const weeksList = document.getElementById("weeksList");
+      const weeks = getWeeklyStats();
+
+      if (weeks.length === 0) {
+        weeksList.innerHTML = `<div class="empty" style="margin-top:0">No weekly data yet.</div>`;
+        return;
+      }
+
+      weeksList.innerHTML = weeks.map(w => `
+        <div class="week-row">
+          <div class="week-click" onclick="toggleWeek('${w.weekStart}')">
+            <div class="week-title-row">
+              <div class="week-title">${formatShortDate(w.weekStart)} – ${formatShortDate(w.weekEnd)}</div>
+              <button class="tiny ghost">${expandedWeekStart === w.weekStart ? "Hide chart" : "Show chart"}</button>
+            </div>
+
+            <div class="week-grid">
+              <div class="week-metric"><b>Total</b><span>${formatScore(w.total)}</span></div>
+              <div class="week-metric"><b>Avg</b><span>${w.avg.toFixed(1)}</span></div>
+              <div class="week-metric"><b>Max</b><span>${formatScore(w.max)}</span></div>
+            </div>
+          </div>
+
+          ${expandedWeekStart === w.weekStart ? `
+            <div class="chart-wrap small-chart">
+              <canvas id="weekChart-${w.weekStart}"></canvas>
+            </div>
+          ` : ""}
+        </div>
+      `).join("");
+
+      if (expandedWeekStart) {
+        setTimeout(() => drawWeekChart(expandedWeekStart), 0);
+      }
+    }
+
+    function toggleDay(dayId) {
+      expandedDayId = expandedDayId === dayId ? null : dayId;
+      render();
+    }
+
+    function toggleWeek(weekStart) {
+      expandedWeekStart = expandedWeekStart === weekStart ? null : weekStart;
+      renderStatus();
+    }
+
+    function renderDayForm() {
+      const host = document.getElementById("dayFormHost");
+      if (!host) return;
+
+      if (!dayFormOpen) {
+        host.classList.add("hidden");
+        host.innerHTML = "";
+        return;
+      }
+
+      host.classList.remove("hidden");
+      host.innerHTML = `
+        <section class="day-card add-day-card">
+          <div class="day-head">
+            <div>
+              <h2 class="day-title">Add a day</h2>
+              <div class="date-line">Choose a date, then start adding actions.</div>
+            </div>
+          </div>
+
+          <div class="form add-day-form">
+            <input id="newDayDate" type="date" value="${todayISO()}" />
+            <div class="form-actions">
+              <button class="primary" onclick="submitDayForm()">Create Day</button>
+              <button class="ghost" onclick="createToday()">Create Today</button>
+              <button class="ghost" onclick="closeDayForm()">Cancel</button>
+            </div>
+          </div>
+        </section>
+      `;
+    }
+
+    function openDayForm() {
+      dayFormOpen = true;
+      showDaysPage(false);
+      renderDayForm();
+      setTimeout(() => document.getElementById("newDayDate")?.focus(), 0);
+    }
+
+    function closeDayForm() {
+      dayFormOpen = false;
+      renderDayForm();
+    }
+
+    function addDay() {
+      openDayForm();
+    }
+
+    function submitDayForm() {
+      const input = document.getElementById("newDayDate");
+      createDay(input?.value || todayISO());
+    }
+
+    function createToday() {
+      createDay(todayISO());
+    }
+
+    function createDay(date) {
+      if (!date) return;
+
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        alert("Wrong date format. Use YYYY-MM-DD.");
+        return;
+      }
+
+      const existing = data.find(day => day.date === date);
+      if (existing) {
+        expandedDayId = existing.id;
+        dayFormOpen = false;
+        render();
+        return;
+      }
+
+      const newDay = {
+        id: uid(),
+        date,
+        createdAt: new Date().toISOString(),
+        note: "",
+        actions: []
+      };
+
+      data.push(newDay);
+      expandedDayId = newDay.id;
+      editingAction = null;
+      dayFormOpen = false;
+
+      saveData();
+      render();
+    }
+
+    function getEditingAction(dayId) {
+      if (!editingAction || editingAction.dayId !== dayId) return null;
+      const day = data.find(d => d.id === dayId);
+      if (!day) return null;
+      return (day.actions || []).find(a => a.id === editingAction.actionId) || null;
+    }
+
+    function renderActionForm(day) {
+      const action = getEditingAction(day.id);
+      const name = action ? escapeHTML(action.name) : "";
+      const hours = action ? formatScore(action.hours) : "";
+      const type = action ? action.type : "IU";
+      const mode = action ? "Edit action" : "Add action";
+      const button = action ? "Save Changes" : "Add Action";
+
+      const option = (value) => `<option value="${value}" ${type === value ? "selected" : ""}>${value} — ${TYPE_LABELS[value]} ×${COEFF[value]}</option>`;
+
+      return `
+        <div class="form action-form">
+          <div class="form-title">${mode}</div>
+          <div class="form-row">
+            <input id="name-${day.id}" placeholder="Action name" value="${name}" autocomplete="off" />
+            <input id="hours-${day.id}" placeholder="Hours" type="number" min="0.1" step="0.25" inputmode="decimal" value="${hours}" />
+          </div>
+
+          <select id="type-${day.id}">
+            ${option("IU")}
+            ${option("INU")}
+            ${option("NIU")}
+            ${option("NINU")}
+          </select>
+
+          <div class="form-actions">
+            <button class="primary" onclick="saveAction('${day.id}')">${button}</button>
+            ${action ? `<button class="ghost" onclick="cancelEditAction()">Cancel Edit</button>` : ""}
+          </div>
+        </div>
+      `;
+    }
+
+    function deleteDay(dayId) {
+      if (!confirm("Delete this whole day?")) return;
+      data = data.filter(day => day.id !== dayId);
+      if (expandedDayId === dayId) expandedDayId = null;
+      if (editingAction?.dayId === dayId) editingAction = null;
+      saveData();
+      render();
+    }
+
+    function saveDayNote(dayId) {
+      const day = data.find(d => d.id === dayId);
+      if (!day) return;
+
+      const noteInput = document.getElementById(`note-${dayId}`);
+      day.note = (noteInput?.value || "").trim();
+      saveData();
+      render();
+    }
+
+    function saveAction(dayId) {
+      const day = data.find(d => d.id === dayId);
+      if (!day) return;
+
+      const nameInput = document.getElementById(`name-${dayId}`);
+      const hoursInput = document.getElementById(`hours-${dayId}`);
+      const typeInput = document.getElementById(`type-${dayId}`);
+
+      const name = nameInput.value.trim();
+      const hours = parseFloat(hoursInput.value);
+      const type = typeInput.value;
+
+      if (!name) {
+        alert("Write action name.");
+        return;
+      }
+
+      if (!Number.isFinite(hours) || hours <= 0) {
+        alert("Hours must be a positive number. Example: 0.5, 1.25, 2.");
+        return;
+      }
+
+      day.actions = day.actions || [];
+
+      const existing = getEditingAction(dayId);
+      if (existing) {
+        existing.name = name;
+        existing.hours = hours;
+        existing.type = type;
+        existing.updatedAt = new Date().toISOString();
+      } else {
+        day.actions.push({
+          id: uid(),
+          name,
+          hours,
+          type,
+          createdAt: new Date().toISOString()
+        });
+      }
+
+      editingAction = null;
+      expandedDayId = dayId;
+      saveData();
+      render();
+    }
+
+    function editAction(dayId, actionId) {
+      editingAction = { dayId, actionId };
+      expandedDayId = dayId;
+      render();
+      setTimeout(() => document.getElementById(`name-${dayId}`)?.focus(), 0);
+    }
+
+    function cancelEditAction() {
+      editingAction = null;
+      render();
+    }
+
+    function deleteAction(dayId, actionId) {
+      const day = data.find(d => d.id === dayId);
+      if (!day) return;
+
+      if (!confirm("Delete this action?")) return;
+
+      day.actions = (day.actions || []).filter(a => a.id !== actionId);
+      if (editingAction?.actionId === actionId) editingAction = null;
+      expandedDayId = dayId;
+      saveData();
+      render();
+    }
+
+    function exportData() {
+      const blob = new Blob([JSON.stringify(data, null, 2)], {
+        type: "application/json"
+      });
+
+      const stamp = todayISO();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `dayscore-backup-${stamp}.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+
+    function importData(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+
+      reader.onload = function(e) {
+        try {
+          const imported = JSON.parse(e.target.result);
+
+          if (!Array.isArray(imported)) {
+            alert("Invalid backup file.");
+            return;
+          }
+
+          if (!confirm("Importing will replace current data. Continue?")) return;
+
+          data = imported;
+          expandedDayId = null;
+          expandedWeekStart = null;
+
+          saveData();
+          render();
+          alert("Imported successfully.");
+        } catch {
+          alert("Could not read JSON.");
+        }
+      };
+
+      reader.readAsText(file);
+      event.target.value = "";
+    }
+
+    async function copyRawJSON() {
+      const text = JSON.stringify(data, null, 2);
+
+      try {
+        await navigator.clipboard.writeText(text);
+        alert("JSON copied.");
+      } catch {
+        prompt("Copy this JSON:", text);
+      }
+    }
+
+    function updateStorageInfo() {
+      const el = document.getElementById("storageInfo");
+      if (!el) return;
+
+      const bytes = new Blob([JSON.stringify(data)]).size;
+      const kb = (bytes / 1024).toFixed(1);
+      const days = data.length;
+      const actions = data.reduce((sum, d) => sum + ((d.actions || []).length), 0);
+
+      el.innerHTML = `
+        <strong style="color:var(--text)">Storage info</strong><br>
+        ${days} day(s), ${actions} action(s), about ${kb} KB.<br>
+        Saved automatically in local browser storage on this phone.
+      `;
+    }
+
+    function escapeHTML(str) {
+      return String(str)
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#039;");
+    }
+
+    function setTopActionsVisible(visible) {
+      const topActions = document.getElementById("topActions");
+      if (!topActions) return;
+      topActions.classList.toggle("hidden", !visible);
+    }
+
+    function showDaysPage(scrollToTop = true) {
+      document.getElementById("daysPage").classList.remove("hidden");
+      document.getElementById("statusPage").classList.add("hidden");
+      document.getElementById("imexPage").classList.add("hidden");
+
+      document.getElementById("daysTab").classList.add("active");
+      document.getElementById("statusTab").classList.remove("active");
+      setTopActionsVisible(true);
+
+      if (scrollToTop) window.scrollTo({ top: 0, behavior: "smooth" });
+      render();
+    }
+
+    function showStatusPage() {
+      document.getElementById("daysPage").classList.add("hidden");
+      document.getElementById("statusPage").classList.remove("hidden");
+      document.getElementById("imexPage").classList.add("hidden");
+
+      document.getElementById("daysTab").classList.remove("active");
+      document.getElementById("statusTab").classList.add("active");
+      setTopActionsVisible(false);
+
+      renderStatus();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+
+    function showImexPage() {
+      document.getElementById("daysPage").classList.add("hidden");
+      document.getElementById("statusPage").classList.add("hidden");
+      document.getElementById("imexPage").classList.remove("hidden");
+
+      document.getElementById("daysTab").classList.remove("active");
+      document.getElementById("statusTab").classList.remove("active");
+      setTopActionsVisible(false);
+
+      updateStorageInfo();
+      window.scrollTo({ top: 0, behavior: "smooth" });
+    }
+
+    function prepareCanvas(canvas) {
+      const ctx = canvas.getContext("2d");
+      const ratio = window.devicePixelRatio || 1;
+      const cssWidth = Math.max(canvas.clientWidth, 280);
+      const cssHeight = Math.max(canvas.clientHeight, 180);
+
+      canvas.width = Math.floor(cssWidth * ratio);
+      canvas.height = Math.floor(cssHeight * ratio);
+
+      ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+
+      return { ctx, w: cssWidth, h: cssHeight };
+    }
+
+    function drawLineChart(canvas, chartData, emptyText = "No data yet.") {
+      if (!canvas) return;
+
+      const { ctx, w, h } = prepareCanvas(canvas);
+
+      ctx.clearRect(0, 0, w, h);
+      ctx.fillStyle = "#fffaf2";
+      ctx.fillRect(0, 0, w, h);
+
+      const left = 40;
+      const right = 18;
+      const top = 22;
+      const bottom = 42;
+      const minY = h - bottom;
+      const maxY = top;
+      const minX = left;
+      const maxX = w - right;
+
+      ctx.strokeStyle = "#eadfce";
+      ctx.lineWidth = 1;
+
+      for (let i = 0; i <= 4; i++) {
+        const y = maxY + i * ((minY - maxY) / 4);
+        ctx.beginPath();
+        ctx.moveTo(minX, y);
+        ctx.lineTo(maxX, y);
+        ctx.stroke();
+      }
+
+      if (!chartData || chartData.length === 0) {
+        ctx.fillStyle = "#746f66";
+        ctx.font = "15px sans-serif";
+        ctx.fillText(emptyText, 24, h / 2);
+        return;
+      }
+
+      const maxScore = Math.max(...chartData.map(d => d.score), 10);
+
+      function xPos(i) {
+        if (chartData.length === 1) return (minX + maxX) / 2;
+        return minX + (i / (chartData.length - 1)) * (maxX - minX);
+      }
+
+      function yPos(score) {
+        return minY - (score / maxScore) * (minY - maxY);
+      }
+
+      ctx.strokeStyle = "#c96442";
+      ctx.lineWidth = 3;
+      ctx.lineJoin = "round";
+      ctx.lineCap = "round";
+      ctx.beginPath();
+
+      chartData.forEach((d, i) => {
+        const x = xPos(i);
+        const y = yPos(d.score);
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      });
+
+      ctx.stroke();
+
+      chartData.forEach((d, i) => {
+        const x = xPos(i);
+        const y = yPos(d.score);
+
+        ctx.fillStyle = "#fffaf2";
+        ctx.beginPath();
+        ctx.arc(x, y, 6, 0, Math.PI * 2);
+        ctx.fill();
+
+        ctx.strokeStyle = "#c96442";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(x, y, 5, 0, Math.PI * 2);
+        ctx.stroke();
+
+        ctx.fillStyle = "#211f1a";
+        ctx.font = "700 11px sans-serif";
+        ctx.fillText(formatScore(d.score), x - 8, y - 11);
+
+        const shouldLabel = chartData.length <= 8 || i % Math.ceil(chartData.length / 6) === 0;
+        if (shouldLabel) {
+          ctx.fillStyle = "#746f66";
+          ctx.font = "11px sans-serif";
+          ctx.save();
+          ctx.translate(x, h - 16);
+          ctx.rotate(-0.45);
+          ctx.fillText(d.date.slice(5), -16, 0);
+          ctx.restore();
+        }
+      });
+
+      ctx.fillStyle = "#746f66";
+      ctx.font = "11px sans-serif";
+      ctx.fillText("0", 12, minY + 4);
+      ctx.fillText(formatScore(maxScore), 8, maxY + 4);
+    }
+
+    function drawDailyChart() {
+      const chartData = [...data]
+        .sort((a, b) => a.date.localeCompare(b.date))
+        .map(day => ({
+          date: day.date,
+          score: getDayStatus(day).total
+        }));
+
+      drawLineChart(document.getElementById("scoreChart"), chartData);
+    }
+
+    function drawWeekChart(weekStart) {
+      const week = getWeeklyStats().find(w => w.weekStart === weekStart);
+      const canvas = document.getElementById(`weekChart-${weekStart}`);
+      if (!week || !canvas) return;
+      drawLineChart(canvas, week.days, "No days in this week.");
+    }
+
+    window.addEventListener("resize", () => {
+      if (!document.getElementById("statusPage").classList.contains("hidden")) {
+        renderStatus();
+      }
+    });
+
+    render();
+  </script>
+
+  <script>
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker.register("./sw.js").catch(err => {
+          console.log("Service worker registration failed:", err);
+        });
+      });
+    }
+  </script>
+
+</body>
+</html>
