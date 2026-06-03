@@ -821,9 +821,15 @@
 }
 
 .form-actions {
-  display: flex;
+  display: grid;
+  grid-template-columns: 1fr;
   gap: 8px;
-  flex-wrap: wrap;
+}
+
+.form-actions button {
+  width: 100%;
+  padding: 12px 14px;
+  border-radius: 16px;
 }
 
 .add-day-card,
