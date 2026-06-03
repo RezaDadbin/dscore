@@ -1,6 +1,3 @@
-<p align="center">
-  <img src="icon-512.png" alt="DScore Logo" width="90" height="90">
-</p>
 
 <h1 align="center">DScore</h1>
 
